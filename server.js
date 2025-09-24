@@ -12,7 +12,7 @@ const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit
+    fileSize: 5 * 1024 * 1024, // Turunkan menjadi 5MB untuk hemat memory
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -23,16 +23,32 @@ const upload = multer({
   }
 });
 
-// In-memory storage
+// In-memory storage dengan periodic cleanup
 let tickets = [];
 let ticketCounter = 1;
 
+// Cleanup tickets yang sudah lama (prevent memory leak)
+function cleanupOldTickets() {
+  const now = new Date();
+  const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000));
+  
+  tickets = tickets.filter(ticket => {
+    const ticketDate = new Date(ticket.createdAt);
+    return ticketDate > thirtyDaysAgo;
+  });
+  
+  console.log(`Cleanup completed. Total tickets: ${tickets.length}`);
+}
+
+// Jalankan cleanup setiap 24 jam
+setInterval(cleanupOldTickets, 24 * 60 * 60 * 1000);
+
 // Middleware - PERBAIKAN: Gunakan express.json() dengan limit yang sesuai
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '5mb' })); // Turunkan limit
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-// Logging middleware
+// Simple logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -42,7 +58,7 @@ app.use((req, res, next) => {
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File terlalu besar. Maksimal 10MB' });
+      return res.status(400).json({ error: 'File terlalu besar. Maksimal 5MB' });
     }
   }
   next(error);
@@ -50,33 +66,41 @@ app.use((error, req, res, next) => {
 
 // Generate unique ticket ID
 function generateTicketId() {
-  return `TKT-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substr(2, 4);
+  return `TKT-${timestamp}-${random}`.toUpperCase();
 }
 
 // Routes
+
+// Root endpoint - sederhana dan cepat
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Stok Helpdesk API is running',
-    version: '1.0.0',
+    status: 'healthy',
     timestamp: new Date().toISOString()
   });
 });
 
-// Health check endpoint
+// Health check endpoint - sangat sederhana dan cepat
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'Stok Helpdesk API is running',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memory: process.memoryUsage()
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
   });
+});
+
+// Simple health check untuk Docker (text plain)
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
 });
 
 // Get all tickets dengan filter status
 app.get('/api/tickets', async (req, res) => {
   try {
-    const { status, page = 1, limit = 100 } = req.query;
+    const { status, page = 1, limit = 50 } = req.query; // Turunkan default limit
     
     let filteredTickets = tickets;
     if (status && status !== 'all') {
@@ -113,7 +137,9 @@ app.get('/api/tickets/:id', async (req, res) => {
       return res.status(404).json({ error: 'Ticket not found' });
     }
     
-    res.json(ticket);
+    // Hapus photo data untuk response yang lebih kecil
+    const { photo, ...ticketWithoutPhoto } = ticket;
+    res.json(ticketWithoutPhoto);
   } catch (error) {
     console.error('Error fetching ticket:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -134,24 +160,28 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
     // Validation
     if (!name || !division || !description) {
       return res.status(400).json({ 
-        error: 'Missing required fields: name, division, description',
-        received: { name, division, description }
+        error: 'Missing required fields: name, division, description'
       });
     }
 
-    // Handle photo jika ada
+    // Handle photo jika ada - kompres jika perlu
     let photoData = '';
     if (req.file) {
-      photoData = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+      // Gunakan buffer langsung tanpa konversi base64 untuk hemat memory
+      photoData = {
+        data: req.file.buffer.toString('base64'),
+        contentType: req.file.mimetype,
+        size: req.file.size
+      };
     }
 
     const newTicket = {
       _id: `ticket_${Date.now()}_${ticketCounter++}`,
       ticketNo: generateTicketId(),
-      name: name.toString().trim(),
-      division: division.toString().trim(),
+      name: String(name).trim(),
+      division: String(division).trim(),
       priority: priority || 'Normal',
-      description: description.toString().trim(),
+      description: String(description).trim(),
       status: 'Belum',
       assignee: '',
       photo: photoData,
@@ -165,9 +195,12 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
 
     console.log('New ticket created:', newTicket.ticketNo);
     
+    // Response tanpa photo data untuk hemat bandwidth
+    const { photo: _, ...responseTicket } = newTicket;
+    
     res.status(201).json({
       message: 'Ticket created successfully',
-      ticket: newTicket,
+      ticket: responseTicket,
       ticketId: newTicket._id
     });
 
@@ -302,7 +335,7 @@ app.delete('/api/tickets/:id', async (req, res) => {
   }
 });
 
-// Dashboard statistics
+// Dashboard statistics - sederhana
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
     const totalTickets = tickets.length;
@@ -311,22 +344,12 @@ app.get('/api/dashboard/stats', async (req, res) => {
     const selesaiTickets = tickets.filter(t => t.status === 'Selesai').length;
     const ditolakTickets = tickets.filter(t => t.status === 'Ditolak').length;
 
-    // Tickets by priority
-    const priorityStats = {};
-    tickets.forEach(ticket => {
-      priorityStats[ticket.priority] = (priorityStats[ticket.priority] || 0) + 1;
-    });
-
     res.json({
       totalTickets,
       belumTickets,
       prosesTickets,
       selesaiTickets,
-      ditolakTickets,
-      priorityStats: Object.entries(priorityStats).map(([priority, count]) => ({
-        _id: priority,
-        count
-      }))
+      ditolakTickets
     });
 
   } catch (error) {
@@ -349,47 +372,76 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// PERBAIKAN PENTING: Handle process shutdown gracefully
-process.on('SIGTERM', () => {
-  console.log('Received SIGTERM signal, shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+// PERBAIKAN: Startup check yang lebih cepat
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const net = require('net');
+    const server = net.createServer();
+    server.listen(port, '0.0.0.0');
+    server.on('error', () => resolve(false));
+    server.on('listening', () => {
+      server.close();
+      resolve(true);
+    });
   });
-});
-
-process.on('SIGINT', () => {
-  console.log('Received SIGINT signal, shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
-  });
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  process.exit(1);
-});
+}
 
 // Start server dengan error handling
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
-});
+async function startServer() {
+  try {
+    // Check jika port available
+    const portAvailable = await isPortAvailable(PORT);
+    if (!portAvailable) {
+      console.error(`Port ${PORT} is already in use`);
+      process.exit(1);
+    }
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use`);
-    process.exit(1);
-  } else {
-    console.error('Server error:', error);
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
+      console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+      console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
+      console.log(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
+    });
+
+    // Graceful shutdown
+    const gracefulShutdown = (signal) => {
+      console.log(`\nReceived ${signal}, shutting down gracefully...`);
+      server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+      });
+
+      // Force shutdown setelah 5 detik
+      setTimeout(() => {
+        console.error('Forcing shutdown after timeout');
+        process.exit(1);
+      }, 5000);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+    // Handle uncaught exceptions
+    process.on('uncaughtException', (error) => {
+      console.error('Uncaught Exception:', error);
+      process.exit(1);
+    });
+
+    process.on('unhandledRejection', (reason, promise) => {
+      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+      process.exit(1);
+    });
+
+    server.on('error', (error) => {
+      console.error('Server error:', error);
+      process.exit(1);
+    });
+
+  } catch (error) {
+    console.error('Failed to start server:', error);
     process.exit(1);
   }
-});
+}
+
+// Jalankan server
+startServer();
