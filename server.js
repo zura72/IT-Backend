@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Konfigurasi Multer untuk file upload
-const storage = multer.memoryStorage(); // Simpan file di memory
+const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
@@ -27,15 +27,14 @@ const upload = multer({
 let tickets = [];
 let ticketCounter = 1;
 
-// Middleware - PERBAIKAN PENTING: Jangan gunakan express.json() untuk FormData
+// Middleware - PERBAIKAN: Gunakan express.json() dengan limit yang sesuai
 app.use(cors());
-// Hanya gunakan urlencoded untuk form data, tidak perlu express.json() jika menerima FormData
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Logging middleware
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  console.log('Content-Type:', req.get('Content-Type'));
   next();
 });
 
@@ -49,13 +48,6 @@ app.use((error, req, res, next) => {
   next(error);
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-  console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
-});
-
 // Generate unique ticket ID
 function generateTicketId() {
   return `TKT-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
@@ -63,7 +55,11 @@ function generateTicketId() {
 
 // Routes
 app.get('/', (req, res) => {
-  res.send('API is running');
+  res.json({ 
+    message: 'Stok Helpdesk API is running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Health check endpoint
@@ -71,7 +67,9 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Stok Helpdesk API is running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
   });
 });
 
@@ -81,17 +79,19 @@ app.get('/api/tickets', async (req, res) => {
     const { status, page = 1, limit = 100 } = req.query;
     
     let filteredTickets = tickets;
-    if (status) {
+    if (status && status !== 'all') {
       filteredTickets = tickets.filter(ticket => ticket.status === status);
     }
     
     // Pagination
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + parseInt(limit);
-    const paginatedTickets = filteredTickets.slice(startIndex, endIndex);
+    const paginatedTickets = filteredTickets
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(startIndex, endIndex);
     
     res.json({
-      rows: paginatedTickets.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+      rows: paginatedTickets,
       totalPages: Math.ceil(filteredTickets.length / limit),
       currentPage: parseInt(page),
       total: filteredTickets.length
@@ -120,14 +120,10 @@ app.get('/api/tickets/:id', async (req, res) => {
   }
 });
 
-// PERBAIKAN BESAR: Create new ticket dengan Multer middleware
+// Create new ticket dengan Multer middleware
 app.post('/api/tickets', upload.single('photo'), async (req, res) => {
   try {
-    console.log('Headers:', req.headers);
-    console.log('Body:', req.body);
-    console.log('File:', req.file);
-
-    // Ambil data dari body (FormData)
+    // Ambil data dari body (FormData atau JSON)
     const {
       name,
       division,
@@ -135,16 +131,7 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
       description
     } = req.body;
 
-    // Debug: Log data yang diterima
-    console.log('Received data:', {
-      name,
-      division,
-      priority,
-      description,
-      hasPhoto: !!req.file
-    });
-
-    // Validation - PERBAIKAN: Handle case-sensitive field names
+    // Validation
     if (!name || !division || !description) {
       return res.status(400).json({ 
         error: 'Missing required fields: name, division, description',
@@ -155,17 +142,16 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
     // Handle photo jika ada
     let photoData = '';
     if (req.file) {
-      // Convert buffer to base64
       photoData = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     }
 
     const newTicket = {
       _id: `ticket_${Date.now()}_${ticketCounter++}`,
       ticketNo: generateTicketId(),
-      name: name.trim(),
-      division: division.trim(),
-      priority: priority || (division.toLowerCase().includes('bod (urgent)') ? 'Urgent' : 'Normal'),
-      description: description.trim(),
+      name: name.toString().trim(),
+      division: division.toString().trim(),
+      priority: priority || 'Normal',
+      description: description.toString().trim(),
       status: 'Belum',
       assignee: '',
       photo: photoData,
@@ -188,6 +174,39 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
   } catch (error) {
     console.error('Error creating ticket:', error);
     res.status(500).json({ error: 'Failed to create ticket: ' + error.message });
+  }
+});
+
+// Update ticket status
+app.put('/api/tickets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, notes, operator } = req.body;
+
+    const ticketIndex = tickets.findIndex(t => 
+      t._id === id || t.ticketNo === id
+    );
+
+    if (ticketIndex === -1) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+
+    tickets[ticketIndex] = {
+      ...tickets[ticketIndex],
+      status: status || tickets[ticketIndex].status,
+      notes: notes || tickets[ticketIndex].notes,
+      operator: operator || tickets[ticketIndex].operator,
+      updatedAt: new Date().toISOString()
+    };
+
+    res.json({
+      message: 'Ticket updated successfully',
+      ticket: tickets[ticketIndex]
+    });
+
+  } catch (error) {
+    console.error('Error updating ticket:', error);
+    res.status(500).json({ error: 'Failed to update ticket' });
   }
 });
 
@@ -290,6 +309,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
     const belumTickets = tickets.filter(t => t.status === 'Belum').length;
     const prosesTickets = tickets.filter(t => t.status === 'Proses').length;
     const selesaiTickets = tickets.filter(t => t.status === 'Selesai').length;
+    const ditolakTickets = tickets.filter(t => t.status === 'Ditolak').length;
 
     // Tickets by priority
     const priorityStats = {};
@@ -302,6 +322,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       belumTickets,
       prosesTickets,
       selesaiTickets,
+      ditolakTickets,
       priorityStats: Object.entries(priorityStats).map(([priority, count]) => ({
         _id: priority,
         count
@@ -326,4 +347,49 @@ app.use((error, req, res, next) => {
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// PERBAIKAN PENTING: Handle process shutdown gracefully
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM signal, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('Received SIGINT signal, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+// Start server dengan error handling
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
+  console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
+});
+
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', error);
+    process.exit(1);
+  }
 });
