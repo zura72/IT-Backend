@@ -2,17 +2,69 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// Konfigurasi Multer untuk file upload
-const storage = multer.memoryStorage();
+// ✅ PERBAIKAN UTAMA: Konfigurasi CORS yang benar
+const allowedOrigins = [
+  'http://localhost:8080',                 // dev frontend
+  'http://localhost:3000',                 // alternative dev port
+  'https://it-helpdesk-stok.netlify.app',  // production frontend
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked for origin:', origin);
+      callback(new Error('CORS not allowed for this origin'));
+    }
+  },
+  credentials: true, // ✅ Izinkan credentials (cookies, authorization)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  optionsSuccessStatus: 200
+};
+
+// Terapkan CORS middleware
+app.use(cors(corsOptions));
+
+// ✅ Handle preflight requests untuk semua routes
+app.options('*', cors(corsOptions));
+
+// ✅ PERBAIKAN BESAR: Konfigurasi Multer untuk file storage (DISK STORAGE)
+// Buat folder uploads jika belum ada
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Created uploads directory');
+}
+
+// Konfigurasi disk storage untuk menyimpan file fisik
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir); // folder uploads
+  },
+  filename: (req, file, cb) => {
+    // Generate nama file unik
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const fileExtension = path.extname(file.originalname);
+    const fileName = uniqueSuffix + fileExtension;
+    cb(null, fileName);
+  }
+});
+
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // Turunkan menjadi 5MB untuk hemat memory
+    fileSize: 5 * 1024 * 1024, // 5MB
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -22,6 +74,9 @@ const upload = multer({
     }
   }
 });
+
+// ✅ Serve static files dari folder uploads
+app.use('/uploads', express.static(uploadsDir));
 
 // In-memory storage dengan periodic cleanup
 let tickets = [];
@@ -40,17 +95,45 @@ function cleanupOldTickets() {
   console.log(`Cleanup completed. Total tickets: ${tickets.length}`);
 }
 
+// Cleanup file uploads yang sudah lama
+function cleanupOldFiles() {
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+  
+  fs.readdir(uploadsDir, (err, files) => {
+    if (err) {
+      console.error('Error reading uploads directory:', err);
+      return;
+    }
+    
+    files.forEach(file => {
+      const filePath = path.join(uploadsDir, file);
+      fs.stat(filePath, (err, stats) => {
+        if (err) return;
+        
+        if (stats.mtime < sevenDaysAgo) {
+          fs.unlink(filePath, err => {
+            if (!err) {
+              console.log(`🗑️ Deleted old file: ${file}`);
+            }
+          });
+        }
+      });
+    });
+  });
+}
+
 // Jalankan cleanup setiap 24 jam
 setInterval(cleanupOldTickets, 24 * 60 * 60 * 1000);
+setInterval(cleanupOldFiles, 24 * 60 * 60 * 1000);
 
-// Middleware - PERBAIKAN: Gunakan express.json() dengan limit yang sesuai
-app.use(cors());
-app.use(express.json({ limit: '5mb' })); // Turunkan limit
+// Middleware lainnya
+app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // Simple logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
   next();
 });
 
@@ -61,6 +144,16 @@ app.use((error, req, res, next) => {
       return res.status(400).json({ error: 'File terlalu besar. Maksimal 5MB' });
     }
   }
+  
+  // Handle CORS errors
+  if (error.message.includes('CORS')) {
+    return res.status(403).json({ 
+      error: 'CORS Error',
+      message: error.message,
+      allowedOrigins: allowedOrigins
+    });
+  }
+  
   next(error);
 });
 
@@ -71,24 +164,46 @@ function generateTicketId() {
   return `TKT-${timestamp}-${random}`.toUpperCase();
 }
 
+// Helper untuk mendapatkan base URL
+function getBaseUrl(req) {
+  if (process.env.NODE_ENV === 'production') {
+    return 'https://it-backend-production.up.railway.app';
+  }
+  return `${req.protocol}://${req.get('host')}`;
+}
+
 // Routes
 
-// Root endpoint - sederhana dan cepat
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Stok Helpdesk API is running',
     status: 'healthy',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    cors: 'configured for credentials',
+    fileStorage: 'disk storage enabled',
+    uploads: '/uploads endpoint available',
+    allowedOrigins: allowedOrigins
   });
 });
 
-// Health check endpoint - sangat sederhana dan cepat
+// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+    cors: {
+      configured: true,
+      credentials: true,
+      allowedOrigins: allowedOrigins
+    },
+    storage: {
+      type: 'disk',
+      uploadsDir: uploadsDir,
+      files: fs.existsSync(uploadsDir) ? fs.readdirSync(uploadsDir).length : 0
+    }
   });
 });
 
@@ -100,7 +215,7 @@ app.get('/health', (req, res) => {
 // Get all tickets dengan filter status
 app.get('/api/tickets', async (req, res) => {
   try {
-    const { status, page = 1, limit = 50 } = req.query; // Turunkan default limit
+    const { status, page = 1, limit = 50 } = req.query;
     
     let filteredTickets = tickets;
     if (status && status !== 'all') {
@@ -137,16 +252,14 @@ app.get('/api/tickets/:id', async (req, res) => {
       return res.status(404).json({ error: 'Ticket not found' });
     }
     
-    // Hapus photo data untuk response yang lebih kecil
-    const { photo, ...ticketWithoutPhoto } = ticket;
-    res.json(ticketWithoutPhoto);
+    res.json(ticket);
   } catch (error) {
     console.error('Error fetching ticket:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Create new ticket dengan Multer middleware
+// ✅ PERBAIKAN BESAR: Create new ticket dengan file storage
 app.post('/api/tickets', upload.single('photo'), async (req, res) => {
   try {
     // Ambil data dari body (FormData atau JSON)
@@ -164,15 +277,12 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
       });
     }
 
-    // Handle photo jika ada - kompres jika perlu
-    let photoData = '';
+    // ✅ PERBAIKAN: Handle photo URL alih-alih base64
+    let photoUrl = '';
     if (req.file) {
-      // Gunakan buffer langsung tanpa konversi base64 untuk hemat memory
-      photoData = {
-        data: req.file.buffer.toString('base64'),
-        contentType: req.file.mimetype,
-        size: req.file.size
-      };
+      // Simpan path relatif, frontend akan construct full URL
+      photoUrl = `/uploads/${req.file.filename}`;
+      console.log('File saved:', photoUrl, 'Size:', req.file.size, 'bytes');
     }
 
     const newTicket = {
@@ -184,7 +294,7 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
       description: String(description).trim(),
       status: 'Belum',
       assignee: '',
-      photo: photoData,
+      photo: photoUrl, // ✅ SEKARANG STRING URL, BUKAN OBJECT
       notes: '',
       operator: '',
       createdAt: new Date().toISOString(),
@@ -193,15 +303,13 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
 
     tickets.push(newTicket);
 
-    console.log('New ticket created:', newTicket.ticketNo);
-    
-    // Response tanpa photo data untuk hemat bandwidth
-    const { photo: _, ...responseTicket } = newTicket;
+    console.log('New ticket created:', newTicket.ticketNo, 'Photo:', photoUrl || 'No photo');
     
     res.status(201).json({
       message: 'Ticket created successfully',
-      ticket: responseTicket,
-      ticketId: newTicket._id
+      ticket: newTicket,
+      ticketId: newTicket._id,
+      ticketNo: newTicket.ticketNo
     });
 
   } catch (error) {
@@ -309,7 +417,7 @@ app.post('/api/tickets/:id/decline', async (req, res) => {
   }
 });
 
-// Delete ticket
+// Delete ticket - Juga hapus file photo jika ada
 app.delete('/api/tickets/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -324,6 +432,16 @@ app.delete('/api/tickets/:id', async (req, res) => {
 
     const deletedTicket = tickets.splice(ticketIndex, 1)[0];
 
+    // Hapus file photo jika ada
+    if (deletedTicket.photo && deletedTicket.photo.startsWith('/uploads/')) {
+      const filePath = path.join(__dirname, deletedTicket.photo);
+      fs.unlink(filePath, (err) => {
+        if (!err) {
+          console.log('🗑️ Deleted photo file:', deletedTicket.photo);
+        }
+      });
+    }
+
     res.json({
       message: 'Ticket deleted successfully',
       ticket: deletedTicket
@@ -335,7 +453,7 @@ app.delete('/api/tickets/:id', async (req, res) => {
   }
 });
 
-// Dashboard statistics - sederhana
+// Dashboard statistics
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
     const totalTickets = tickets.length;
@@ -361,6 +479,16 @@ app.get('/api/dashboard/stats', async (req, res) => {
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
+  
+  // Handle CORS errors specifically
+  if (error.message.includes('CORS')) {
+    return res.status(403).json({ 
+      error: 'CORS Error',
+      message: error.message,
+      allowedOrigins: allowedOrigins
+    });
+  }
+  
   res.status(500).json({ 
     error: 'Internal server error',
     message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
@@ -400,6 +528,11 @@ async function startServer() {
       console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
       console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
       console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
+      console.log(`🖼️  File uploads: http://localhost:${PORT}/uploads/`);
+      console.log(`🔧 CORS configured for:`, allowedOrigins);
+      console.log(`🔐 Credentials: ALLOWED`);
+      console.log(`💾 Storage: DISK STORAGE (${uploadsDir})`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
     });
 

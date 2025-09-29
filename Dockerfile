@@ -1,10 +1,7 @@
 FROM node:18-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install --production
 COPY . .
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:4000/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1))"
-
-EXPOSE 4000
+EXPOSE 4000   # hanya expose default, tapi app bakal ikut env Railway
 CMD ["node", "server.js"]
