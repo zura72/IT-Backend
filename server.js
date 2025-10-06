@@ -62,7 +62,9 @@ const corsOptions = {
     'Accept', 
     'X-Requested-With',
     'Access-Control-Allow-Origin',
-    'Origin'
+    'Origin',
+    'X-Requested-With',
+    'Content-Disposition'
   ],
   exposedHeaders: ['Content-Disposition'],
   optionsSuccessStatus: 200,
@@ -310,9 +312,25 @@ app.get('/api/tickets/:id', async (req, res) => {
   }
 });
 
-// ✅ PERBAIKAN BESAR: Create new ticket dengan file storage
+// ✅ PERBAIKAN BESAR: Create new ticket dengan file storage dan logging detail
 app.post('/api/tickets', upload.single('photo'), async (req, res) => {
   try {
+    console.log('📨 Received ticket creation request');
+    console.log('Request headers:', req.headers);
+    console.log('Content-Type:', req.headers['content-type']);
+    console.log('Request body keys:', Object.keys(req.body));
+    console.log('Request file:', req.file ? {
+      fieldname: req.file.fieldname,
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    } : 'No file');
+    
+    // Log semua field di body
+    for (let key in req.body) {
+      console.log(`Body field "${key}":`, req.body[key] ? `"${req.body[key]}"` : 'EMPTY');
+    }
+
     // Ambil data dari body (FormData atau JSON)
     const {
       name,
@@ -321,19 +339,36 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
       description
     } = req.body;
 
-    // Validation
-    if (!name || !division || !description) {
+    console.log('Parsed fields:', { 
+      name: name || 'MISSING', 
+      division: division || 'MISSING', 
+      priority: priority || 'MISSING',
+      description: description || 'MISSING' 
+    });
+
+    // Validation - lebih fleksibel
+    const missingFields = [];
+    if (!name || name.trim() === '') missingFields.push('name');
+    if (!division || division.trim() === '') missingFields.push('division');
+    if (!description || description.trim() === '') missingFields.push('description');
+
+    if (missingFields.length > 0) {
+      console.log('❌ Missing fields:', missingFields);
       return res.status(400).json({ 
-        error: 'Missing required fields: name, division, description'
+        error: `Missing required fields: ${missingFields.join(', ')}`,
+        received: {
+          name: !!name,
+          division: !!division,
+          description: !!description
+        }
       });
     }
 
-    // ✅ PERBAIKAN: Handle photo URL alih-alih base64
+    // ✅ PERBAIKAN: Handle photo URL
     let photoUrl = '';
     if (req.file) {
-      // Simpan path relatif, frontend akan construct full URL
       photoUrl = `/uploads/${req.file.filename}`;
-      console.log('File saved:', photoUrl, 'Size:', req.file.size, 'bytes');
+      console.log('✅ File saved:', photoUrl, 'Size:', req.file.size, 'bytes');
     }
 
     const newTicket = {
@@ -354,7 +389,7 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
 
     tickets.push(newTicket);
 
-    console.log('New ticket created:', newTicket.ticketNo, 'Photo:', photoUrl || 'No photo');
+    console.log('✅ New ticket created:', newTicket.ticketNo, 'Photo:', photoUrl || 'No photo');
     
     res.status(201).json({
       message: 'Ticket created successfully',
@@ -364,8 +399,11 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error creating ticket:', error);
-    res.status(500).json({ error: 'Failed to create ticket: ' + error.message });
+    console.error('❌ Error creating ticket:', error);
+    res.status(500).json({ 
+      error: 'Failed to create ticket: ' + error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
