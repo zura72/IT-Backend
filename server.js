@@ -6,7 +6,14 @@ const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
+
+// ✅ FIX untuk Railway: Gunakan PORT dari environment
 const PORT = process.env.PORT || 4000;
+
+// ✅ FIX untuk Railway: File storage directory
+const uploadsDir = process.env.NODE_ENV === 'production' 
+  ? '/tmp/uploads'  // Railway prefer temporary directory
+  : path.join(__dirname, 'uploads');
 
 // ✅ PERBAIKAN UTAMA: Konfigurasi CORS yang benar
 const allowedOrigins = [
@@ -14,6 +21,14 @@ const allowedOrigins = [
   'http://localhost:3000',                 // alternative dev port
   'https://it-helpdesk-stok.netlify.app',  // production frontend
 ];
+
+// Auto-allow Railway preview domains
+if (process.env.RAILWAY_STATIC_URL) {
+  allowedOrigins.push(process.env.RAILWAY_STATIC_URL);
+}
+if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+  allowedOrigins.push(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`);
+}
 
 const corsOptions = {
   origin: function (origin, callback) {
@@ -23,8 +38,13 @@ const corsOptions = {
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.log('CORS blocked for origin:', origin);
-      callback(new Error('CORS not allowed for this origin'));
+      // Allow Railway preview domains dynamically
+      if (origin.includes('.railway.app')) {
+        callback(null, true);
+      } else {
+        console.log('CORS blocked for origin:', origin);
+        callback(new Error('CORS not allowed for this origin'));
+      }
     }
   },
   credentials: true, // ✅ Izinkan credentials (cookies, authorization)
@@ -41,10 +61,9 @@ app.options('*', cors(corsOptions));
 
 // ✅ PERBAIKAN BESAR: Konfigurasi Multer untuk file storage (DISK STORAGE)
 // Buat folder uploads jika belum ada
-const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
-  console.log('📁 Created uploads directory');
+  console.log('📁 Created uploads directory:', uploadsDir);
 }
 
 // Konfigurasi disk storage untuk menyimpan file fisik
@@ -56,7 +75,7 @@ const storage = multer.diskStorage({
     // Generate nama file unik
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     const fileExtension = path.extname(file.originalname);
-    const fileName = uniqueSuffix + fileExtension;
+    const fileName = 'img-' + uniqueSuffix + fileExtension;
     cb(null, fileName);
   }
 });
@@ -167,7 +186,7 @@ function generateTicketId() {
 // Helper untuk mendapatkan base URL
 function getBaseUrl(req) {
   if (process.env.NODE_ENV === 'production') {
-    return 'https://it-backend-production.up.railway.app';
+    return `https://${req.get('host')}`;
   }
   return `${req.protocol}://${req.get('host')}`;
 }
@@ -180,9 +199,12 @@ app.get('/', (req, res) => {
     message: 'Stok Helpdesk API is running',
     status: 'healthy',
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    port: PORT,
     cors: 'configured for credentials',
     fileStorage: 'disk storage enabled',
     uploads: '/uploads endpoint available',
+    uploadsDir: uploadsDir,
     allowedOrigins: allowedOrigins
   });
 });
@@ -194,6 +216,7 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+    environment: process.env.NODE_ENV || 'development',
     cors: {
       configured: true,
       credentials: true,
@@ -203,6 +226,10 @@ app.get('/api/health', (req, res) => {
       type: 'disk',
       uploadsDir: uploadsDir,
       files: fs.existsSync(uploadsDir) ? fs.readdirSync(uploadsDir).length : 0
+    },
+    railway: {
+      publicDomain: process.env.RAILWAY_PUBLIC_DOMAIN || 'not set',
+      staticUrl: process.env.RAILWAY_STATIC_URL || 'not set'
     }
   });
 });
@@ -434,7 +461,7 @@ app.delete('/api/tickets/:id', async (req, res) => {
 
     // Hapus file photo jika ada
     if (deletedTicket.photo && deletedTicket.photo.startsWith('/uploads/')) {
-      const filePath = path.join(__dirname, deletedTicket.photo);
+      const filePath = path.join(uploadsDir, deletedTicket.photo.replace('/uploads/', ''));
       fs.unlink(filePath, (err) => {
         if (!err) {
           console.log('🗑️ Deleted photo file:', deletedTicket.photo);
@@ -519,7 +546,7 @@ async function startServer() {
   try {
     // Check jika port available
     const portAvailable = await isPortAvailable(PORT);
-    if (!portAvailable) {
+    if (!portAvailable && process.env.NODE_ENV !== 'production') {
       console.error(`Port ${PORT} is already in use`);
       process.exit(1);
     }
@@ -529,10 +556,12 @@ async function startServer() {
       console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
       console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
       console.log(`🖼️  File uploads: http://localhost:${PORT}/uploads/`);
+      console.log(`📁 Uploads directory: ${uploadsDir}`);
       console.log(`🔧 CORS configured for:`, allowedOrigins);
       console.log(`🔐 Credentials: ALLOWED`);
-      console.log(`💾 Storage: DISK STORAGE (${uploadsDir})`);
+      console.log(`💾 Storage: DISK STORAGE`);
       console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🚂 Railway: ${process.env.RAILWAY_PUBLIC_DOMAIN || 'Not detected'}`);
       console.log(`💾 Memory usage: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
     });
 
