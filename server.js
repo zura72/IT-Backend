@@ -6,23 +6,18 @@ const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
-
-// ✅ FIX untuk Railway: Gunakan PORT dari environment
 const PORT = process.env.PORT || 4000;
 
-// ✅ FIX untuk Railway: File storage directory
-const uploadsDir = process.env.NODE_ENV === 'production' 
-  ? '/tmp/uploads'  // Railway prefer temporary directory
-  : path.join(__dirname, 'uploads');
-
-// ✅ PERBAIKAN UTAMA: Konfigurasi CORS yang benar
+// ✅ FIX CORS: Konfigurasi yang lebih comprehensive
 const allowedOrigins = [
-  'http://localhost:8080',                 // dev frontend
-  'http://localhost:3000',                 // alternative dev port
-  'https://it-helpdesk-stok.netlify.app',  // production frontend
+  'http://localhost:8080',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'https://it-helpdesk-stok.netlify.app',
+  'https://it.waskitainfrastruktur.co.id', // ✅ DOMAIN PRODUCTION ANDA
 ];
 
-// Auto-allow Railway preview domains
+// Auto-allow Railway preview domains dan production domains
 if (process.env.RAILWAY_STATIC_URL) {
   allowedOrigins.push(process.env.RAILWAY_STATIC_URL);
 }
@@ -30,27 +25,49 @@ if (process.env.RAILWAY_PUBLIC_DOMAIN) {
   allowedOrigins.push(`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`);
 }
 
+// ✅ FIX: CORS configuration yang lebih flexible
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, curl, postman)
     if (!origin) return callback(null, true);
     
+    // Check if origin is in allowed list
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      // Allow Railway preview domains dynamically
-      if (origin.includes('.railway.app')) {
+      // Allow subdomains of waskitainfrastruktur.co.id
+      if (origin.endsWith('.waskitainfrastruktur.co.id')) {
         callback(null, true);
-      } else {
-        console.log('CORS blocked for origin:', origin);
-        callback(new Error('CORS not allowed for this origin'));
+      } 
+      // Allow Railway domains
+      else if (origin.includes('.railway.app')) {
+        callback(null, true);
+      }
+      // Allow Netlify domains
+      else if (origin.includes('.netlify.app')) {
+        callback(null, true);
+      }
+      else {
+        console.log('🚫 CORS blocked for origin:', origin);
+        console.log('✅ Allowed origins:', allowedOrigins);
+        callback(new Error('CORS not allowed for this origin'), false);
       }
     }
   },
-  credentials: true, // ✅ Izinkan credentials (cookies, authorization)
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  optionsSuccessStatus: 200
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'Accept', 
+    'X-Requested-With',
+    'Access-Control-Allow-Origin',
+    'Origin'
+  ],
+  exposedHeaders: ['Content-Disposition'],
+  optionsSuccessStatus: 200,
+  preflightContinue: false,
+  maxAge: 86400 // 24 hours
 };
 
 // Terapkan CORS middleware
@@ -58,6 +75,11 @@ app.use(cors(corsOptions));
 
 // ✅ Handle preflight requests untuk semua routes
 app.options('*', cors(corsOptions));
+
+// ✅ FIX untuk Railway: File storage directory
+const uploadsDir = process.env.NODE_ENV === 'production' 
+  ? '/tmp/uploads'
+  : path.join(__dirname, 'uploads');
 
 // ✅ PERBAIKAN BESAR: Konfigurasi Multer untuk file storage (DISK STORAGE)
 // Buat folder uploads jika belum ada
@@ -69,7 +91,7 @@ if (!fs.existsSync(uploadsDir)) {
 // Konfigurasi disk storage untuk menyimpan file fisik
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadsDir); // folder uploads
+    cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
     // Generate nama file unik
@@ -100,6 +122,39 @@ app.use('/uploads', express.static(uploadsDir));
 // In-memory storage dengan periodic cleanup
 let tickets = [];
 let ticketCounter = 1;
+
+// Middleware lainnya
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
+// Logging middleware untuk debug CORS
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log('Origin:', req.headers.origin);
+  console.log('User-Agent:', req.headers['user-agent']);
+  next();
+});
+
+// Helper untuk menangani FormData parsing errors
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File terlalu besar. Maksimal 5MB' });
+    }
+  }
+  
+  // Handle CORS errors
+  if (error.message.includes('CORS')) {
+    return res.status(403).json({ 
+      error: 'CORS Error',
+      message: error.message,
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin
+    });
+  }
+  
+  next(error);
+});
 
 // Cleanup tickets yang sudah lama (prevent memory leak)
 function cleanupOldTickets() {
@@ -146,36 +201,6 @@ function cleanupOldFiles() {
 setInterval(cleanupOldTickets, 24 * 60 * 60 * 1000);
 setInterval(cleanupOldFiles, 24 * 60 * 60 * 1000);
 
-// Middleware lainnya
-app.use(express.json({ limit: '5mb' }));
-app.use(express.urlencoded({ extended: true, limit: '5mb' }));
-
-// Simple logging middleware
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin || 'none'}`);
-  next();
-});
-
-// Helper untuk menangani FormData parsing errors
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'File terlalu besar. Maksimal 5MB' });
-    }
-  }
-  
-  // Handle CORS errors
-  if (error.message.includes('CORS')) {
-    return res.status(403).json({ 
-      error: 'CORS Error',
-      message: error.message,
-      allowedOrigins: allowedOrigins
-    });
-  }
-  
-  next(error);
-});
-
 // Generate unique ticket ID
 function generateTicketId() {
   const timestamp = Date.now().toString(36);
@@ -193,43 +218,42 @@ function getBaseUrl(req) {
 
 // Routes
 
-// Root endpoint
+// Root endpoint dengan info CORS
 app.get('/', (req, res) => {
   res.json({ 
     message: 'Stok Helpdesk API is running',
     status: 'healthy',
+    cors: {
+      configured: true,
+      allowedOrigins: allowedOrigins,
+      currentOrigin: req.headers.origin,
+      isAllowed: allowedOrigins.includes(req.headers.origin) || 
+                (req.headers.origin && req.headers.origin.endsWith('.waskitainfrastruktur.co.id'))
+    },
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    port: PORT,
-    cors: 'configured for credentials',
-    fileStorage: 'disk storage enabled',
-    uploads: '/uploads endpoint available',
-    uploadsDir: uploadsDir,
-    allowedOrigins: allowedOrigins
+    uploadsDir: uploadsDir
   });
 });
 
-// Health check endpoint
+// Health check endpoint dengan info CORS
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
-    environment: process.env.NODE_ENV || 'development',
     cors: {
       configured: true,
       credentials: true,
-      allowedOrigins: allowedOrigins
+      allowedOrigins: allowedOrigins,
+      currentOrigin: req.headers.origin
     },
+    environment: process.env.NODE_ENV || 'development',
     storage: {
       type: 'disk',
       uploadsDir: uploadsDir,
       files: fs.existsSync(uploadsDir) ? fs.readdirSync(uploadsDir).length : 0
-    },
-    railway: {
-      publicDomain: process.env.RAILWAY_PUBLIC_DOMAIN || 'not set',
-      staticUrl: process.env.RAILWAY_STATIC_URL || 'not set'
     }
   });
 });
@@ -321,7 +345,7 @@ app.post('/api/tickets', upload.single('photo'), async (req, res) => {
       description: String(description).trim(),
       status: 'Belum',
       assignee: '',
-      photo: photoUrl, // ✅ SEKARANG STRING URL, BUKAN OBJECT
+      photo: photoUrl,
       notes: '',
       operator: '',
       createdAt: new Date().toISOString(),
@@ -512,7 +536,9 @@ app.use((error, req, res, next) => {
     return res.status(403).json({ 
       error: 'CORS Error',
       message: error.message,
-      allowedOrigins: allowedOrigins
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin,
+      note: 'Please check if your domain is in the allowed origins list'
     });
   }
   
@@ -524,7 +550,11 @@ app.use((error, req, res, next) => {
 
 // 404 handler
 app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Endpoint not found' });
+  res.status(404).json({ 
+    error: 'Endpoint not found',
+    path: req.originalUrl,
+    method: req.method
+  });
 });
 
 // PERBAIKAN: Startup check yang lebih cepat
@@ -553,9 +583,9 @@ async function startServer() {
 
     const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Stok Helpdesk API running on port ${PORT}`);
-      console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
-      console.log(`🎫 Tickets endpoint: http://localhost:${PORT}/api/tickets`);
-      console.log(`🖼️  File uploads: http://localhost:${PORT}/uploads/`);
+      console.log(`📊 Health check: https://it-backend-production.up.railway.app/api/health`);
+      console.log(`🎫 Tickets endpoint: https://it-backend-production.up.railway.app/api/tickets`);
+      console.log(`🖼️  File uploads: https://it-backend-production.up.railway.app/uploads/`);
       console.log(`📁 Uploads directory: ${uploadsDir}`);
       console.log(`🔧 CORS configured for:`, allowedOrigins);
       console.log(`🔐 Credentials: ALLOWED`);
